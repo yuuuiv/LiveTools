@@ -5,7 +5,6 @@
     <title>Livestream Player</title>
     <link href="https://vjs.zencdn.net/8.6.1/video-js.css" rel="stylesheet" />
     <style>
-        /* 居中播放器，让页面看起来更干净 */
         body {
             background-color: #000;
             display: flex;
@@ -53,9 +52,9 @@
             html5: {
                 hls: {
                     // 【性能优化】设置最大缓冲区长度为 60 秒
-                    maxBufferLength: 60, 
+                    maxBufferLength: 90, 
                     // 【性能优化】设置最大下载缓冲区为 60MB，防止内存溢出
-                    maxBufferSize: 60 * 1024 * 1024 
+                    maxBufferSize: 90 * 1024 * 1024 
                 }
             }
         });
