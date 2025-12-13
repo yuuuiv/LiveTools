@@ -3,51 +3,88 @@
 <head>
     <title>Live Stream Player</title>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <link href="https://vjs.zencdn.net/8.10.0/video-js.css" rel="stylesheet" />
+    
     <style>
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Arial', sans-serif;
             margin: 0;
-            padding: 20px;
+            padding: 0;
             background-color: #f4f4f4;
             display: flex;
-            flex-direction: column;
+            justify-content: center;
             align-items: center;
+            min-height: 100vh; /* 确保页面占满视口高度 */
         }
         .container {
-            width: 80%;
+            width: 90%;
             max-width: 1280px;
             background-color: white;
-            padding: 20px;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
         }
         h1 {
             text-align: center;
-            color: #333;
+            color: #2c3e50;
+            margin-bottom: 25px;
+        }
+        /* 播放器容器样式，保持居中 */
+        .video-container {
+            width: 100%;
+            padding-top: 56.25%; /* 保持 16:9 比例 (9 / 16 * 100%) */
+            position: relative;
+        }
+        .video-js {
+            position: absolute !important;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            left: 0;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        .info-box {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #ecf0f1;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .info-box code {
+            background-color: #bdc3c7;
+            padding: 2px 5px;
+            border-radius: 3px;
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>LiveTrial>Liv>
+        <h1>Live Stream Player (HLS)</h1>
         
-        <video
-            id="Live-Trial"
-            class="video-js vjs-default-skin"
-            controls
-            preload="auto"
-            width="100%"
-            height="auto"
-            data-setup="{}"
-        >
-            <source
-                src="http://hls.livetrial.me/hls/388493-0029-001.m3u8"
-                type="application/x-mpegURL"
-            />
-            <p class="vjs-no-js">
-                要观看此视频，请启用 JavaScript，并考虑升级您的浏览器
-            </p>
-        </video>
+        <div class="video-container">
+            <video
+                id="live-video-player"
+                class="video-js vjs-default-skin"
+                controls
+                preload="auto"
+                data-setup="{}"
+            >
+                <source
+                    src="http://hls.livetrial.me/hls/388493-0029-001.m3u8"
+                    type="application/x-mpegURL"
+                />
+                <p class="vjs-no-js">
+                    要观看此视频，请启用 JavaScript，并考虑升级您的浏览器
+                </p>
+            </video>
+        </div>
+        
+        <div class="info-box">
+            <p><strong>播放器前端：</strong> GitHub Pages (HTTPS)</p>
+        </div>
     </div>
 
     <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
