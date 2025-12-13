@@ -9,3 +9,7 @@ ffmpeg -re -i "TargetVideo.ts" -c:v libx264 -preset veryfast -b:v 3000k -maxrate
 - self-downloading
 - self-watching
 - push forward
+
+## TODO
+- CDN Services
+- Stronger Encryption
