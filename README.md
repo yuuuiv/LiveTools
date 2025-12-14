@@ -1,5 +1,6 @@
-# LiveTrial
+# LiveTools
 
+https://live.neofantasy.online/
 https://live.livetrial.me/
 
 ## Command Line Example (better for local videos)
@@ -9,7 +10,10 @@ ffmpeg -re -i "TargetVideo.ts" -c:v libx264 -preset veryfast -b:v 3000k -maxrate
 - self-downloading
 - self-watching
 - push forward
+- M3U8 illustration
 
 ## TODO
 - CDN Services
 - Stronger Encryption
+- Responsive adaptation
+- GUI
