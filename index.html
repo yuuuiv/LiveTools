@@ -2,44 +2,58 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>Livestream Player</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveStreaming</title>
     <link href="https://vjs.zencdn.net/8.6.1/video-js.css" rel="stylesheet" />
+    
     <style>
         body {
-            background-color: #000;
+            background-color: #111; /* 稍微深一点的灰色，比纯黑柔和 */
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
             margin: 0;
+            padding: 20px 0; /* 留出一点上下边距 */
+            box-sizing: border-box;
         }
+
+        /* 播放器容器设置 */
+        .video-container {
+            width: 90%; /* 最大宽度占屏幕的 90% */
+            max-width: 1200px; /* 限制最大尺寸 */
+            position: relative;
+            /* 响应式 16:9 比例 */
+            padding-top: 56.25%; 
+        }
+
+        /* 视频播放器自身填满容器 */
         .video-js {
-            /* 设定播放器最大宽度 */
-            max-width: 90vw;
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
+            height: 100%;
         }
     </style>
 </head>
 <body>
 
-    <video
-        id="live-player"
-        class="video-js vjs-default-skin vjs-big-play-centered"
-        controls
-        preload="auto"
-        width="1024"
-        height="576"
-        poster=""
-        data-setup='{}'
-    >
-        <source
-            src="https://hls.livetrial.me/hls/livestream.m3u8"
-            type="application/x-mpegURL"
-        />
-        <p class="vjs-no-js">
-            要观看此视频，请启用 JavaScript，并考虑升级到支持 HTML5 视频的浏览器。
-        </p>
-    </video>
+    <div class="video-container">
+        <video
+            id="live-player"
+            class="video-js vjs-default-skin vjs-big-play-centered"
+            controls
+            preload="auto"
+            poster=""
+            data-setup='{}'
+        >
+            <source
+                src="https://live.neofantasy.online/hls/livestream.m3u8"
+                type="application/x-mpegURL"
+            />
+        </video>
+    </div>
 
     <script src="https://vjs.zencdn.net/8.6.1/video.min.js"></script>
 
@@ -48,12 +62,14 @@
         var player = videojs('live-player', {
             // 确保自动预加载
             preload: 'auto',
+            // 静音自动播放，兼容性更好
+            muted: true,
             
             html5: {
                 hls: {
-                    // 【性能优化】设置最大缓冲区长度为 60 秒
+                    // 【性能优化】设置最大缓冲区长度为 90 秒
                     maxBufferLength: 90, 
-                    // 【性能优化】设置最大下载缓冲区为 60MB，防止内存溢出
+                    // 【性能优化】设置最大下载缓冲区为 90MB，防止内存溢出
                     maxBufferSize: 90 * 1024 * 1024 
                 }
             }
@@ -61,6 +77,16 @@
 
         // 自动播放
         player.autoplay(true); 
+
+        // 尝试播放。如果浏览器阻止了自动播放，提示用户手动点击。
+        player.ready(function() {
+            var playPromise = this.play();
+            if (playPromise !== undefined) {
+                playPromise.catch(error => {
+                    console.log("浏览器阻止了自动播放，请手动点击播放按钮。");
+                });
+            }
+        });
     </script>
 
 </body>
