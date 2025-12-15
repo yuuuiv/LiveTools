@@ -2,97 +2,44 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LiveStreaming</title>
+    <title>Livestream Player</title>
     <link href="https://vjs.zencdn.net/8.6.1/video-js.css" rel="stylesheet" />
-    
     <style>
         body {
-            background-color: #111;
+            background-color: #000;
             display: flex;
             justify-content: center;
             align-items: center;
             min-height: 100vh;
             margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Segoe UI', 'Arial', 'PingFang SC', 'Microsoft YaHei', sans-serif;
-            font-size: 1.1rem;
-            overflow: auto;
         }
-
-        .video-container {
-            width: 90%;
-            max-width: 1200px;
-            position: relative;
-            padding-top: 56.25%;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.3);
-            border-radius: 12px;
-            background: #222;
-        }
-
         .video-js {
-            position: absolute;
-            top: 0;
-            left: 0;
+            /* 设定播放器最大宽度 */
+            max-width: 90vw;
             width: 100%;
-            height: 100%;
-            border-radius: 12px;
-        }
-
-        /* 确保控制条在悬停时显示 */
-        .video-js:hover .vjs-control-bar {
-            display: flex !important;
-            opacity: 1 !important;
-        }
-
-        /* 响应式字体和布局调整 */
-        @media (max-width: 900px) {
-            .video-container {
-                max-width: 100vw;
-                padding-top: 56.25%;
-            }
-            body {
-                font-size: 1rem;
-                overflow: auto;
-            }
-        }
-
-        @media (max-width: 600px) {
-            .video-container {
-                width: 100vw;
-                max-width: 100vw;
-                padding-top: 60vw; /* 稍微拉高比例，适配竖屏 */
-                border-radius: 0;
-            }
-            .video-js {
-                border-radius: 0;
-            }
-            body {
-                padding: 0;
-                font-size: 0.95rem;
-                overflow: auto;
-            }
         }
     </style>
 </head>
 <body>
 
-    <div class="video-container">
-        <video
-            id="live-player"
-            class="video-js vjs-default-skin vjs-big-play-centered"
-            controls
-            preload="auto"
-            poster=""
-            data-setup='{}'
-        >
-            <source
-                src="https://hls.neofantasy.online/hls/livestream.m3u8"
-                type="application/x-mpegURL"
-            />
-        </video>
-    </div>
+    <video
+        id="live-player"
+        class="video-js vjs-default-skin vjs-big-play-centered"
+        controls
+        preload="auto"
+        width="1024"
+        height="576"
+        poster=""
+        data-setup='{}'
+    >
+        <source
+            src="https://hls.neofantasy.online/hls/livestream.m3u8"
+            type="application/x-mpegURL"
+        />
+        <p class="vjs-no-js">
+            要观看此视频，请启用 JavaScript，并考虑升级到支持 HTML5 视频的浏览器。
+        </p>
+    </video>
 
     <script src="https://vjs.zencdn.net/8.6.1/video.min.js"></script>
 
@@ -101,14 +48,12 @@
         var player = videojs('live-player', {
             // 确保自动预加载
             preload: 'auto',
-            // 静音自动播放，兼容性更好
-            muted: true,
             
             html5: {
                 hls: {
-                    // 【性能优化】设置最大缓冲区长度为 90 秒
+                    // 【性能优化】设置最大缓冲区长度为 60 秒
                     maxBufferLength: 90, 
-                    // 【性能优化】设置最大下载缓冲区为 90MB，防止内存溢出
+                    // 【性能优化】设置最大下载缓冲区为 60MB，防止内存溢出
                     maxBufferSize: 90 * 1024 * 1024 
                 }
             }
@@ -116,16 +61,6 @@
 
         // 自动播放
         player.autoplay(true); 
-
-        // 尝试播放。如果浏览器阻止了自动播放，提示用户手动点击。
-        player.ready(function() {
-            var playPromise = this.play();
-            if (playPromise !== undefined) {
-                playPromise.catch(error => {
-                    console.log("浏览器阻止了自动播放，请手动点击播放按钮。");
-                });
-            }
-        });
     </script>
 
 </body>
