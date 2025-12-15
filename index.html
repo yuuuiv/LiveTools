@@ -18,7 +18,7 @@
             box-sizing: border-box;
             font-family: 'Segoe UI', 'Arial', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             font-size: 1.1rem;
-            overflow: hidden;
+            overflow: auto;
         }
 
         .video-container {
@@ -38,6 +38,12 @@
             width: 100%;
             height: 100%;
             border-radius: 12px;
+        }
+
+        /* 确保控制条在悬停时显示 */
+        .video-js:hover .vjs-control-bar {
+            display: flex !important;
+            opacity: 1 !important;
         }
 
         /* 响应式字体和布局调整 */
