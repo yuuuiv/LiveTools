@@ -12,9 +12,9 @@ ffmpeg -re -i "TargetVideo.ts" -c:v libx264 -preset veryfast -b:v 3000k -maxrate
 - self-watching
 - push forward
 - M3U8 illustration
+  CDN Services
 
 ## TODO
-- CDN Services
 - Stronger Encryption
 - Responsive adaptation
 - GUI
