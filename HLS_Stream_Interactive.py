@@ -150,15 +150,24 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
     
     # --- 0. 初始化和路径设置 ---
     if suggested_filename:
-        # 清理文件名中的非法字符
-        suggested_filename = re.sub(r'[<>:"/\\|?*]', '_', suggested_filename)
+        # 清理文件名中的非法字符（跨平台处理）
+        # Windows非法字符: < > : " / \ | ? *
+        # Linux非法字符: / 和 null
+        # 使用平台无关的清理方式
+        suggested_filename = re.sub(r'[<>:"/|?*\\]', '_', suggested_filename)
+        # 移除控制字符和null字符
+        suggested_filename = re.sub(r'[\x00-\x1f\x7f]', '_', suggested_filename)
         default_filename = f"{suggested_filename}_{stream.resolution}.ts"
     else:
         default_filename = f"HLS_Stream_FULL_{stream.resolution}_{stream.bandwidth.replace(' ', '_').replace('.', 'p')}.ts"
     output_path = input(f"\n请输入完整的保存路径和文件名 (默认为当前目录下的 {default_filename}): ").strip()
     final_output_filename = output_path if output_path else default_filename
     
-    temp_dir = os.path.join(os.path.dirname(final_output_filename) or os.getcwd(), f"temp_hls_download_{int(time.time())}")
+    # 确保使用绝对路径，避免路径问题
+    if not os.path.isabs(final_output_filename):
+        final_output_filename = os.path.join(os.getcwd(), final_output_filename)
+    
+    temp_dir = os.path.join(os.path.dirname(final_output_filename), f"temp_hls_download_{int(time.time())}")
     base_name = os.path.splitext(os.path.basename(final_output_filename))[0]
     history_output_file = os.path.join(temp_dir, f"{base_name}_0.ts")
     live_output_file = os.path.join(temp_dir, f"{base_name}_1.ts")
@@ -336,24 +345,33 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
                 seg_name = f"segment_{i}.ts"
                 seg_path = os.path.join(temp_dir, seg_name)
                 if os.path.exists(seg_path):
+                    # 在FFmpeg的concat文件中使用正斜杠（跨平台兼容）
+                    # 或者直接使用文件名（因为FFmpeg会在同一目录下查找）
                     filelist_f.write(f"file '{seg_name}'\n")
-
-        print(f"\n[信息] 历史分片下载完成。开始合并 {history_segments_count} 个分片到 {os.path.basename(history_output_file)}")
-        
-        merge_command_0 = [
-            "ffmpeg", "-f", "concat", "-safe", "0", "-i", file_list_path, 
-            "-c", "copy", history_output_file
-        ]
         
         try:
+            # 使用 FFmpeg concat 协议合并历史分片
+            history_merge_command = [
+                "ffmpeg", 
+                "-f", "concat", 
+                "-safe", "0", 
+                "-i", file_list_path, 
+                "-c", "copy",
+                history_output_file
+            ]
+            
             original_cwd = os.getcwd()
             os.chdir(temp_dir)
-            subprocess.run(merge_command_0, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            os.chdir(original_cwd) 
+            subprocess.run(history_merge_command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            os.chdir(original_cwd)
+            
             print(f"[成功] 历史分片合并为 {os.path.basename(history_output_file)} 完成。")
         except subprocess.CalledProcessError as e:
             print(f"[严重错误] 历史分片合并失败。中止。")
             print(e.stderr.decode())
+            download_success = False
+        except Exception as e:
+            print(f"[严重错误] 历史分片合并时发生未知错误: {e}")
             download_success = False
 
 
@@ -676,6 +694,8 @@ if __name__ == "__main__":
     print("HLS M3U8 视频流解析工具")
     print("=========================================================")
     print("提示: 请粘贴完整的 M3U8 播放列表内容，或包含视频链接的文本。")
+    print("支持格式:\n - 直接 M3U8 内容 (以 #EXTM3U 开始)\n - 文本格式: 包含 '视频链接:' 的行，指向 M3U8 URL")
+    print("对于多行内容，请在粘贴后按 Ctrl+D (Linux/macOS) 或 Ctrl+Z (Windows) 确认输入结束。")
     print("---------------------------------------------------------")
 
     try:
