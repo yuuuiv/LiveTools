@@ -142,14 +142,19 @@ async def async_download_segment(session, ts_url, ts_local_path, cookie, max_ret
 
     return False, ts_local_path, False
 
-async def async_perform_download(stream, cookie=None):
+async def async_perform_download(stream, cookie=None, suggested_filename=None):
     """
     三阶段下载与合并 (异步并发下载历史分片，FFmpeg 下载实时分片)
     """
     if not check_ffmpeg(): return
     
     # --- 0. 初始化和路径设置 ---
-    default_filename = f"HLS_Stream_FULL_{stream.resolution}_{stream.bandwidth.replace(' ', '_').replace('.', 'p')}.ts"
+    if suggested_filename:
+        # 清理文件名中的非法字符
+        suggested_filename = re.sub(r'[<>:"/\\|?*]', '_', suggested_filename)
+        default_filename = f"{suggested_filename}_{stream.resolution}.ts"
+    else:
+        default_filename = f"HLS_Stream_FULL_{stream.resolution}_{stream.bandwidth.replace(' ', '_').replace('.', 'p')}.ts"
     output_path = input(f"\n请输入完整的保存路径和文件名 (默认为当前目录下的 {default_filename}): ").strip()
     final_output_filename = output_path if output_path else default_filename
     
@@ -441,13 +446,13 @@ async def async_perform_download(stream, cookie=None):
         
     print("\n程序运行结束。")
 
-def perform_download(stream, cookie=None):
+def perform_download(stream, cookie=None, suggested_filename=None):
     """
     同步调用 async_perform_download，作为程序的主要入口。
     """
     try:
-        # 使用 asyncio.run 运行异步主函数
-        asyncio.run(async_perform_download(stream, cookie))
+        # 使用 asyncio.run 执行异步函数
+        asyncio.run(async_perform_download(stream, cookie, suggested_filename))
     except KeyboardInterrupt:
         print("\n[中断] 用户手动停止下载。")
     except Exception as e:
@@ -601,7 +606,7 @@ def view_or_download_m3u8(stream, cookie=None):
         else:
             print("[警告] 输入无效，请重新输入 1 或 2。")
 
-def handle_user_choice(streams, cookie=None):
+def handle_user_choice(streams, cookie=None, suggested_filename=None):
     """
     处理用户的视频流选择和操作选择。
     """
@@ -647,7 +652,7 @@ def handle_user_choice(streams, cookie=None):
     while True:
         operation = input("请输入操作编号 (1-5): ")
         if operation == '1':
-            perform_download(selected_stream, cookie)
+            perform_download(selected_stream, cookie, suggested_filename)
             break
         elif operation == '2':
             perform_playback(selected_stream)
@@ -687,6 +692,7 @@ if __name__ == "__main__":
     m3u8_content_start = input_data.find("#EXTM3U")
     base_url = None
     cookie = None
+    suggested_filename = None
     
     if m3u8_content_start != -1:
         # 情况 1: 用户直接粘贴了 M3U8 内容
@@ -695,12 +701,34 @@ if __name__ == "__main__":
         # 情况 2: 用户粘贴了包含链接和 Cookie 的文本
         lines = input_data.splitlines()
         url = None
-        for line in lines:
-            line = line.strip()
-            if line.startswith("视频链接:"):
-                url = line.split(":", 1)[1].strip()
-            elif line.startswith("Cookie:"):
-                cookie = line.split(":", 1)[1].strip()
+        
+        # 尝试提取节目名称
+        program_name_match = re.search(r'节目名称[:：]\s*(.+)', input_data)
+        if program_name_match:
+            suggested_filename = program_name_match.group(1).strip()
+            print(f"[信息] 检测到节目名称: {suggested_filename}")
+        
+        # 尝试从 minyami 命令中提取 URL 和 Cookie
+        minyami_url_match = re.search(r'minyami\s+-d\s+["\']([^"\'\n]+)["\']', input_data)
+        if minyami_url_match:
+            url = minyami_url_match.group(1).strip()
+            print(f"[信息] 从 minyami 命令中提取到 URL: {url}")
+            
+            # 尝试提取 Cookie（从 --headers 参数中）
+            # 处理多种可能的格式：--headers "Cookie: xxx" 或 --headers 'Cookie: xxx'
+            minyami_cookie_match = re.search(r'--headers\s+["\']Cookie:\s*([^"\'\n]+)["\']', input_data)
+            if minyami_cookie_match:
+                cookie = minyami_cookie_match.group(1).strip()
+                print("[信息] 从 minyami 命令中提取到 Cookie")
+        
+        # 如果 minyami 格式未匹配，尝试原有的格式
+        if not url:
+            for line in lines:
+                line = line.strip()
+                if line.startswith("视频链接:"):
+                    url = line.split(":", 1)[1].strip()
+                elif line.startswith("Cookie:"):
+                    cookie = line.split(":", 1)[1].strip()
         
         if url:
             print(f"[信息] 检测到视频链接: {url}")
@@ -726,6 +754,6 @@ if __name__ == "__main__":
             sys.exit(1)
     
     streams = parse_m3u8_string(m3u8_content, base_url)
-    handle_user_choice(streams, cookie)
+    handle_user_choice(streams, cookie, suggested_filename)
         
     print("\n程序运行结束。")

@@ -1,0 +1,4 @@
+节目id:351452-0070-001
+节目名称:わんちゃんわんわんねこにゃんにゃん ＷＡＮＮＹＡＮ　５ｔｈ　ＡＮＮＩＶＥＲＳＡＲＹ　ＯＮＥＭＡＮ　ＬＩＶＥ
+下载命令:
+minyami -d "https://example.com/stream.m3u8" --threads 8 --headers "Cookie: key1=val1;key2=val2" -o "output.ts"
