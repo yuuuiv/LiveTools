@@ -5,10 +5,51 @@ import sys
 import urllib.request
 import urllib.parse
 import time
+import hashlib
 import shutil # 用于处理临时目录和文件移动
 import concurrent.futures # 新增导入
 import asyncio # 用于异步下载
 import threading
+
+# --- 阿里云直播鉴权函数 (A 类鉴权) ---
+
+def md5sum(src):
+    """计算字符串的 MD5 哈希值"""
+    m = hashlib.md5()
+    m.update(src)
+    return m.hexdigest()
+
+def a_auth(uri, key, exp):
+    """
+    生成阿里云视频直播 A 类鉴权的 URL。
+    
+    参数:
+        uri: 原始 RTMP 推流地址 (例如: rtmp://push.domain.com/app/stream)
+        key: 阿里云后台配置的鉴权主 KEY
+        exp: 过期时间的 UNIX 时间戳 (秒)
+    
+    返回:
+        带 auth_key 参数的完整推流 URL
+    """
+    p = re.compile(r"^(rtmp://)?([^/?]+)(/[^?]*)?(\?.*)?$")
+    if not p:
+        return None
+    m = p.match(uri)
+    scheme, host, path, args = m.groups()
+    if not scheme: scheme = "rtmp://"
+    if not path: path = "/"
+    if not args: args = ""
+    
+    rand = "0"      # "0" by default, other value is ok
+    uid = "0"       # "0" by default, other value is ok
+    sstring = "%s-%s-%s-%s-%s" % (path, exp, rand, uid, key)
+    hashvalue = md5sum(sstring.encode('utf-8'))
+    auth_key = "%s-%s-%s-%s" % (exp, rand, uid, hashvalue)
+    
+    if args:
+        return "%s%s%s%s&auth_key=%s" % (scheme, host, path, args, auth_key)
+    else:
+        return "%s%s%s%s?auth_key=%s" % (scheme, host, path, args, auth_key)
 
 # --- 核心数据结构 ---
 
@@ -505,28 +546,49 @@ def perform_playback(stream):
 
 def perform_livestream(stream, cookie=None):
     """
-    使用 FFmpeg 将 HLS 流推送到 RTMP 服务器。
+    使用 FFmpeg 将 HLS 流推送到阿里云视频直播服务 (带 A 类鉴权)。
     """
     if not check_ffmpeg(): return
     
-    # 您的服务器 IP 地址和配置的应用名称
-    SERVER_IP = "165.22.106.165"
-    APP_NAME = "live"
+    # 阿里云视频直播配置
+    PUSH_DOMAIN = "push.neofantasy.online"  # 阿里云推流域名
+    PLAY_DOMAIN = "play.neofantasy.online"  # 阿里云播放域名
+    APP_NAME = "live"                       # 应用名称 (AppName)
+    AUTH_KEY = "aB64yd0xzH7o3PI2"        # 阿里云后台配置的鉴权主 KEY (请替换为实际的 KEY)
+    EXP_MARGIN = 14400                       # 鉴权有效期：14400 秒 (4 小时)
     
-    # 提示用户输入推流密钥
-    stream_key = input(f"请输入推流密钥 (例如: my_stream_key): ").strip()
+    # 提示用户输入推流密钥 (StreamName)
+    stream_key = input(f"请输入推流密钥/流名称 (StreamName, 例如: my_stream_key): ").strip()
     
     if not stream_key:
         print("[错误] 推流密钥不能为空，操作取消。")
         return
-        
-    rtmp_url = f"rtmp://{SERVER_IP}:1935/{APP_NAME}/{stream_key}"
+    
+    # 构建原始 RTMP 推流地址 (不带鉴权)
+    base_rtmp_url = f"rtmp://{PUSH_DOMAIN}/{APP_NAME}/{stream_key}"
+    
+    # 生成鉴权过期时间戳
+    exp_timestamp = int(time.time()) + EXP_MARGIN
+    
+    # 使用 A 类鉴权生成带 auth_key 的完整推流 URL
+    authenticated_rtmp_url = a_auth(base_rtmp_url, AUTH_KEY, exp_timestamp)
+    
+    if not authenticated_rtmp_url:
+        print("[错误] 生成鉴权 URL 失败，请检查配置。")
+        return
+    
+    print(f"\n[推流] 正在将 HLS 流 ({stream.resolution} @ {stream.bandwidth}) 推送到阿里云")
+    print(f"[配置] 推流域名: {PUSH_DOMAIN}")
+    print(f"[配置] 应用名称: {APP_NAME}")
+    print(f"[配置] 流名称: {stream_key}")
+    print(f"[鉴权] 有效期至: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp_timestamp))}")
+    print(f"\n[注意] 推流开始后，您可以通过以下地址观看：")
+    print(f"       RTMP 播放: rtmp://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}")
+    print(f"       HLS 播放:  http://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}.m3u8")
+    print(f"       FLV 播放:  http://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}.flv")
+    print(f"\n提示: 如果播放域名也开启了鉴权，您需要同样为播放 URL 生成 auth_key。")
 
-    print(f"\n[推流] 正在将 HLS 流 ({stream.resolution} @ {stream.bandwidth}) 推送到 {rtmp_url}")
-    print(f"[注意] 推流开始后，您可以在浏览器中访问以下 HLS 地址观看：")
-    print(f"       http://{SERVER_IP}/hls/{stream_key}.m3u8")
-
-    # 构建推流命令 (使用兼容性更高的转码命令)
+    # 构建推流命令 (保留原有的转码参数)
     livestream_command = [
         "ffmpeg",
         # 关键设置: 忽略输入流中的时间戳错误，对直播源尤其重要
@@ -536,7 +598,7 @@ def perform_livestream(stream, cookie=None):
     if cookie:
         livestream_command.extend(["-headers", f"Cookie: {cookie}"])
     
-    # 尝试使用 -i 自动处理流选择
+    # 添加输入源和编码参数
     livestream_command.extend([
         # 输入源
         "-i", stream.url,
@@ -550,15 +612,17 @@ def perform_livestream(stream, cookie=None):
         # 音频编码参数
         "-c:a", "aac", 
         "-b:a", "128k", 
-        # 输出格式和目标地址
+        # 输出格式和目标地址 (使用带鉴权的 URL)
         "-f", "flv", 
-        rtmp_url
+        authenticated_rtmp_url
     ])
 
     try:
-        print("--- FFmpeg 推流开始 (按 Ctrl+C 停止) ---")
+        print("\n--- FFmpeg 推流开始 (按 Ctrl+C 停止) ---")
         subprocess.run(livestream_command)
         print("--- 推流已停止 ---")
+    except KeyboardInterrupt:
+        print("\n[中断] 用户手动停止推流。")
     except Exception as e:
         print(f"[错误] 推流过程中发生错误: {e}")
 
