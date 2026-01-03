@@ -564,7 +564,7 @@ def perform_playback(stream):
 
 def perform_livestream(stream, cookie=None):
     """
-    使用 FFmpeg 将 HLS 流推送到阿里云视频直播服务 (带 A 类鉴权)。
+    使用 FFmpeg 将 HLS 流推送到阿里云视频直播服务。
     """
     if not check_ffmpeg(): return
     
@@ -572,8 +572,6 @@ def perform_livestream(stream, cookie=None):
     PUSH_DOMAIN = "push.neofantasy.online"  # 阿里云推流域名
     PLAY_DOMAIN = "play.neofantasy.online"  # 阿里云播放域名
     APP_NAME = "live"                       # 应用名称 (AppName)
-    AUTH_KEY = "aB64yd0xzH7o3PI2"        # 阿里云后台配置的鉴权主 KEY (请替换为实际的 KEY)
-    EXP_MARGIN = 14400                       # 鉴权有效期：14400 秒 (4 小时)
     
     # 提示用户输入推流密钥 (StreamName)
     stream_key = input(f"请输入推流密钥/流名称 (StreamName, 例如: my_stream_key): ").strip()
@@ -582,31 +580,19 @@ def perform_livestream(stream, cookie=None):
         print("[错误] 推流密钥不能为空，操作取消。")
         return
     
-    # 构建原始 RTMP 推流地址 (不带鉴权)
-    base_rtmp_url = f"rtmp://{PUSH_DOMAIN}/{APP_NAME}/{stream_key}"
-    
-    # 生成鉴权过期时间戳
-    exp_timestamp = int(time.time()) + EXP_MARGIN
-    
-    # 使用 A 类鉴权生成带 auth_key 的完整推流 URL
-    authenticated_rtmp_url = a_auth(base_rtmp_url, AUTH_KEY, exp_timestamp)
-    
-    if not authenticated_rtmp_url:
-        print("[错误] 生成鉴权 URL 失败，请检查配置。")
-        return
+    # 构建 RTMP 推流地址 (无鉴权)
+    rtmp_url = f"rtmp://{PUSH_DOMAIN}/{APP_NAME}/{stream_key}"
     
     print(f"\n[推流] 正在将 HLS 流 ({stream.resolution} @ {stream.bandwidth}) 推送到阿里云")
     print(f"[配置] 推流域名: {PUSH_DOMAIN}")
     print(f"[配置] 应用名称: {APP_NAME}")
     print(f"[配置] 流名称: {stream_key}")
-    print(f"[鉴权] 有效期至: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(exp_timestamp))}")
     print(f"\n[注意] 推流开始后，您可以通过以下地址观看：")
     print(f"       RTMP 播放: rtmp://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}")
     print(f"       HLS 播放:  http://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}.m3u8")
     print(f"       FLV 播放:  http://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}.flv")
-    print(f"\n提示: 如果播放域名也开启了鉴权，您需要同样为播放 URL 生成 auth_key。")
 
-    # 构建推流命令 (保留原有的转码参数)
+    # 构建推流命令 (使用流复制，无需重新编码)
     livestream_command = [
         "ffmpeg",
         # 关键设置: 忽略输入流中的时间戳错误，对直播源尤其重要
@@ -616,23 +602,15 @@ def perform_livestream(stream, cookie=None):
     if cookie:
         livestream_command.extend(["-headers", f"Cookie: {cookie}"])
     
-    # 添加输入源和编码参数
+    # 添加输入源和流复制参数
     livestream_command.extend([
         # 输入源
         "-i", stream.url,
-        # 视频编码参数 (H.264 快速编码)
-        "-c:v", "libx264", 
-        "-preset", "veryfast", 
-        "-b:v", "4000k",        # 目标码率 4 Mbps
-        "-maxrate", "5000k", 
-        "-bufsize", "7000k", 
-        "-pix_fmt", "yuv420p",
-        # 音频编码参数
-        "-c:a", "aac", 
-        "-b:a", "128k", 
-        # 输出格式和目标地址 (使用带鉴权的 URL)
+        # 直接复制音视频流，不重新编码（节省 CPU，保持质量，降低延迟）
+        "-c", "copy",
+        # 输出格式和目标地址
         "-f", "flv", 
-        authenticated_rtmp_url
+        rtmp_url
     ])
 
     try:
