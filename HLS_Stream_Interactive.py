@@ -55,15 +55,36 @@ def a_auth(uri, key, exp):
 
 class VideoStream:
     """定义一个类来存储解析出的视频流信息"""
-    def __init__(self, resolution, bandwidth, url):
+    def __init__(self, resolution, bandwidth, url, headers=None):
         self.resolution = resolution
         self.bandwidth = bandwidth
         self.url = url
+        self.headers = headers or {}
     
     def __str__(self):
         return f"分辨率: {self.resolution} | 码率: {self.bandwidth} | URL: {self.url[:60]}..."
 
 # --- M3U8 解析函数 ---
+
+def parse_attribute_list(value):
+    """Parse an HLS attribute list without splitting commas inside quotes."""
+    values = {}
+    current = []
+    quoted = False
+    for char in value:
+        if char == '"':
+            quoted = not quoted
+        if char == ',' and not quoted:
+            current.append('\n')
+        else:
+            current.append(char)
+    for item in ''.join(current).splitlines():
+        if '=' not in item:
+            continue
+        key, raw = item.split('=', 1)
+        values[key.strip().upper()] = raw.strip().strip('"')
+    return values
+
 
 def parse_m3u8_string(input_string, base_url=None):
     """
@@ -73,11 +94,8 @@ def parse_m3u8_string(input_string, base_url=None):
     streams = []
     lines = input_string.splitlines() 
     
-    stream_info_pattern = re.compile(r'^#EXT-X-STREAM-INF:(.+)')
-    resolution_pattern = re.compile(r'RESOLUTION=([\d]+x[\d]+)')
-    bandwidth_pattern = re.compile(r'BANDWIDTH=([\d]+)')
-    
     current_info_attributes = None
+    saw_media_segment = False
     
     for line in lines:
         line = line.strip() 
@@ -86,37 +104,65 @@ def parse_m3u8_string(input_string, base_url=None):
             continue 
             
         # 1. 检查是否是配置行 (#EXT-X-STREAM-INF)
-        info_match = stream_info_pattern.match(line)
-        if info_match:
-            current_info_attributes = info_match.group(1)
+        if line.startswith('#EXT-X-STREAM-INF:'):
+            current_info_attributes = parse_attribute_list(line.split(':', 1)[1])
             
         # 2. 检查是否是 URL 行 
         elif current_info_attributes is not None and not line.startswith('#'):
             url = line
-            if base_url and not url.startswith('http'):
+            if base_url and not urllib.parse.urlparse(url).scheme:
                 url = urllib.parse.urljoin(base_url, url)
-            
-            resolution = "N/A"
-            bandwidth_raw = 0
-            
-            resolution_match = resolution_pattern.search(current_info_attributes)
-            if resolution_match:
-                resolution = resolution_match.group(1)
-                
-            bandwidth_match = bandwidth_pattern.search(current_info_attributes)
-            if bandwidth_match:
-                bandwidth_raw = int(bandwidth_match.group(1))
-            
-            bandwidth = f"{bandwidth_raw / 1000000:.2f} Mbps" 
-            
+            resolution = current_info_attributes.get('RESOLUTION', 'N/A')
+            bandwidth_raw = int(current_info_attributes.get('BANDWIDTH', '0') or 0)
+            average_bandwidth = int(current_info_attributes.get('AVERAGE-BANDWIDTH', bandwidth_raw) or 0)
+            bandwidth = f"{max(bandwidth_raw, average_bandwidth) / 1000000:.2f} Mbps"
             streams.append(VideoStream(resolution, bandwidth, url))
-            
+
             current_info_attributes = None
-            
+        elif line.startswith('#EXTINF:') or line.startswith('#EXT-X-PART:'):
+            saw_media_segment = True
         elif line.startswith('#'):
-            current_info_attributes = None
+            continue
+
+    # A media playlist has no STREAM-INF entries. Treat the source itself as
+    # one selectable stream so the caller can still preview or push it.
+    if not streams and saw_media_segment and base_url:
+        streams.append(VideoStream("N/A", "N/A", base_url))
             
     return streams
+
+
+def make_headers(cookie=None, headers=None):
+    result = dict(headers or {})
+    if cookie and 'Cookie' not in result:
+        result['Cookie'] = cookie
+    return result
+
+
+def add_request_headers(request, headers=None):
+    for name, value in (headers or {}).items():
+        if value:
+            request.add_header(name, value)
+
+
+def ffmpeg_headers(headers=None):
+    return ''.join(f'{name}: {value}\r\n' for name, value in (headers or {}).items() if value)
+
+
+def parse_header_blob(value):
+    """Parse common curl/minyami header text without logging credentials."""
+    result = {}
+    if not value:
+        return result
+    parts = re.split(r'\r?\n|(?=\b(?:Cookie|Referer|Authorization|User-Agent):)', value)
+    for part in parts:
+        if ':' not in part:
+            continue
+        name, header_value = part.split(':', 1)
+        name = name.strip()
+        if name.lower() in {'cookie', 'referer', 'authorization', 'user-agent'}:
+            result[name.title() if name.lower() != 'user-agent' else 'User-Agent'] = header_value.strip()
+    return result
 
 # --- FFmpeg 检查函数 ---
 
@@ -145,7 +191,7 @@ def display_progress_bar(prefix, current, total, bar_length=15):
     return f'{prefix} [{arrow + spaces}] {current}/{total} ({percent * 100:.1f}%)'
 
 # --- 异步下载段函数（增加存在性检查和重试） ---
-async def async_download_segment(session, ts_url, ts_local_path, cookie, max_retries=3):
+async def async_download_segment(session, ts_url, ts_local_path, cookie, headers=None, max_retries=3):
     """
     异步下载单个分片，失败重试 max_retries 次，并在下载前检查本地是否存在。
     返回: (成功状态, 文件路径, 是否跳过)
@@ -161,8 +207,7 @@ async def async_download_segment(session, ts_url, ts_local_path, cookie, max_ret
             # 使用 urllib.request 进行同步下载的包装器 (在线程池中运行)
             def sync_fetch():
                 req = urllib.request.Request(ts_url)
-                if cookie:
-                    req.add_header('Cookie', cookie)
+                add_request_headers(req, make_headers(cookie, headers))
                 
                 with urllib.request.urlopen(req, timeout=10) as response: 
                     # 写入文件
@@ -183,7 +228,7 @@ async def async_download_segment(session, ts_url, ts_local_path, cookie, max_ret
 
     return False, ts_local_path, False
 
-async def async_perform_download(stream, cookie=None, suggested_filename=None):
+async def async_perform_download(stream, cookie=None, suggested_filename=None, headers=None):
     """
     三阶段下载与合并 (异步并发下载历史分片，FFmpeg 下载实时分片)
     """
@@ -235,13 +280,16 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
     
     try:
         req = urllib.request.Request(top_level_url)
-        if cookie:
-            req.add_header('Cookie', cookie)
+        add_request_headers(req, make_headers(cookie, headers))
         with urllib.request.urlopen(req) as response:
             top_m3u8_content = response.read().decode('utf-8')
         
         sub_streams = parse_m3u8_string(top_m3u8_content, base_url=top_level_url)
-        user_bandwidth_raw = int(float(stream.bandwidth.split()[0]) * 1000000) 
+        user_bandwidth_raw = 0
+        try:
+            user_bandwidth_raw = int(float(stream.bandwidth.split()[0]) * 1000000)
+        except (ValueError, IndexError):
+            pass
         selected_sub_stream_url = None
         
         for s in sub_streams:
@@ -251,8 +299,8 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
             except:
                 pass
             
-            resolution_match = (s.resolution == stream.resolution)
-            bandwidth_match = abs(s_bandwidth_raw - user_bandwidth_raw) < 10000 
+            resolution_match = stream.resolution == 'N/A' or s.resolution == stream.resolution
+            bandwidth_match = user_bandwidth_raw == 0 or abs(s_bandwidth_raw - user_bandwidth_raw) < 10000
             
             if resolution_match and bandwidth_match:
                 selected_sub_stream_url = s.url
@@ -266,45 +314,28 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
             final_stream_url = top_level_url
 
         req = urllib.request.Request(final_stream_url)
-        if cookie:
-            req.add_header('Cookie', cookie)
+        add_request_headers(req, make_headers(cookie, headers))
         with urllib.request.urlopen(req) as response:
             live_m3u8_content = response.read().decode('utf-8')
             
-        ts_url_pattern = re.compile(r'index_(\d)_(\d+)\.ts(\?m=\d+)')
-        last_index = -1
-        last_segment_url = None
-        
+        # 不再假设供应商使用 index_N_N.ts 命名。按 HLS playlist 逐项解析，
+        # 这样可以兼容相对路径、query token 和不同的分片命名方式。
+        key_lines = [line for line in live_m3u8_content.splitlines() if line.startswith('#EXT-X-KEY:')]
+        if any('METHOD=NONE' not in line.upper() for line in key_lines):
+            print("[错误] 输入是加密 HLS（包含非 NONE 的 EXT-X-KEY）；工具不会尝试解密或绕过内容保护。")
+            return
+        segment_urls = []
         for line in live_m3u8_content.splitlines():
             line = line.strip()
-            ts_match = ts_url_pattern.search(line)
-            if ts_match:
-                current_index = int(ts_match.group(2))
-                if current_index > last_index:
-                    last_index = current_index
-                    last_segment_url = line 
-        
-        if last_index == -1:
-            print("[错误] 未能在子流 M3U8 中找到可识别的分片 URL 模式。下载中止。")
+            if not line or line.startswith('#'):
+                continue
+            segment_urls.append(urllib.parse.urljoin(final_stream_url, line))
+
+        if not segment_urls:
+            print("[错误] 子流 M3U8 中没有找到媒体分片。")
             return
-            
-        print(f"[信息] 检测到最新的分片索引 N 为: {last_index}。")
-            
-        base_prefix_match = re.search(r'(.*/index_\d+)\.m3u8', final_stream_url)
-        
-        if not base_prefix_match:
-            final_stream_dir = final_stream_url.rsplit('/', 1)[0]
-            index_match = re.search(r'(index_\d+)', last_segment_url)
-            if index_match:
-                 base_prefix = f"{final_stream_dir}/{index_match.group(1)}"
-            else:
-                print("[严重错误] 无法从 URL 构造分片基础前缀。下载中止。")
-                return
-        else:
-             base_prefix = base_prefix_match.group(1) 
-        
-        url_suffix_match = re.search(r'(\.ts\?m=\d+)', last_segment_url)
-        url_suffix = url_suffix_match.group(1) if url_suffix_match else ".ts"
+
+        print(f"[信息] 检测到历史分片数量: {len(segment_urls)}。")
         
     except Exception as e:
         print(f"[错误] 阶段 1 发生致命错误: {e}")
@@ -312,16 +343,15 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
     
     # --- 2. 阶段 A: 异步并发下载历史分片 (0 到 N) ---
     
-    print(f"\n--- 阶段 2/3: 异步并发下载历史分片 (索引 0 到 {last_index}) ---")
-    total_segments = last_index + 1
+    print(f"\n--- 阶段 2/3: 异步并发下载历史分片 (共 {len(segment_urls)} 个) ---")
+    total_segments = len(segment_urls)
     print(f"[信息] 将使用 asyncio 并发下载 {total_segments} 个历史分片 (重试 3 次，支持断点续传)。")
     
     # 2.1 准备下载任务列表
     tasks = []
-    for i in range(total_segments):
-        ts_url = f"{base_prefix}_{i}{url_suffix}"
+    for i, ts_url in enumerate(segment_urls):
         ts_local_path = os.path.join(temp_dir, f"segment_{i}.ts")
-        tasks.append(async_download_segment(None, ts_url, ts_local_path, cookie, max_retries=3))
+        tasks.append(async_download_segment(None, ts_url, ts_local_path, cookie, headers=headers, max_retries=3))
     
     # 2.2 运行异步下载任务并监控进度
     results = []
@@ -419,13 +449,14 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
     # --- 3. 阶段 B: FFmpeg 下载后续直播分片 ($N+1$ 到 End) ---
 
     if download_success:
-        print(f"\n--- 阶段 3/3: 下载后续直播分片 ({last_index + 1} 到 End) ---")
+        print("\n--- 阶段 3/3: 下载后续直播分片 (实时) ---")
         print("[信息] 使用 FFmpeg 实时下载 (内置重试机制: -reconnect, 间隔 5s)。")
         
         download_command_1 = ["ffmpeg"]
         
-        if cookie:
-            download_command_1.extend(["-headers", f"Cookie: {cookie}"])
+        request_header_text = ffmpeg_headers(make_headers(cookie, headers))
+        if request_header_text:
+            download_command_1.extend(["-headers", request_header_text])
             
         # 设置 FFmpeg 内置重试机制
         download_command_1.extend([
@@ -505,13 +536,13 @@ async def async_perform_download(stream, cookie=None, suggested_filename=None):
         
     print("\n程序运行结束。")
 
-def perform_download(stream, cookie=None, suggested_filename=None):
+def perform_download(stream, cookie=None, suggested_filename=None, headers=None):
     """
     同步调用 async_perform_download，作为程序的主要入口。
     """
     try:
         # 使用 asyncio.run 执行异步函数
-        asyncio.run(async_perform_download(stream, cookie, suggested_filename))
+        asyncio.run(async_perform_download(stream, cookie, suggested_filename, headers))
     except KeyboardInterrupt:
         print("\n[中断] 用户手动停止下载。")
     except Exception as e:
@@ -562,7 +593,7 @@ def perform_playback(stream):
     except Exception as e:
         print(f"[错误] 启动播放器时发生错误: {e}")
 
-def perform_livestream(stream, cookie=None):
+def perform_livestream(stream, cookie=None, headers=None):
     """
     使用 FFmpeg 将 HLS 流推送到阿里云视频直播服务。
     """
@@ -599,8 +630,9 @@ def perform_livestream(stream, cookie=None):
         "-fflags", "+genpts",
     ]
     
-    if cookie:
-        livestream_command.extend(["-headers", f"Cookie: {cookie}"])
+    request_header_text = ffmpeg_headers(make_headers(cookie, headers))
+    if request_header_text:
+        livestream_command.extend(["-headers", request_header_text])
     
     # 添加输入源和流复制参数
     livestream_command.extend([
@@ -624,7 +656,7 @@ def perform_livestream(stream, cookie=None):
 
 # --- 用户交互逻辑 ---
 
-def view_or_download_m3u8(stream, cookie=None):
+def view_or_download_m3u8(stream, cookie=None, headers=None):
     """
     查看或下载指定流的 M3U8 列表内容。
     """
@@ -639,8 +671,7 @@ def view_or_download_m3u8(stream, cookie=None):
             # 查看 M3U8 内容
             try:
                 req = urllib.request.Request(stream.url)
-                if cookie:
-                    req.add_header('Cookie', cookie)
+                add_request_headers(req, make_headers(cookie, headers))
                 with urllib.request.urlopen(req) as response:
                     content = response.read().decode('utf-8')
                 print("\n--- M3U8 内容 ---")
@@ -654,8 +685,7 @@ def view_or_download_m3u8(stream, cookie=None):
             filename = f"{os.path.splitext(os.path.basename(stream.url))[0]}.m3u8"
             try:
                 req = urllib.request.Request(stream.url)
-                if cookie:
-                    req.add_header('Cookie', cookie)
+                add_request_headers(req, make_headers(cookie, headers))
                 with urllib.request.urlopen(req) as response:
                     with open(filename, 'wb') as f:
                         f.write(response.read())
@@ -666,7 +696,7 @@ def view_or_download_m3u8(stream, cookie=None):
         else:
             print("[警告] 输入无效，请重新输入 1 或 2。")
 
-def handle_user_choice(streams, cookie=None, suggested_filename=None):
+def handle_user_choice(streams, cookie=None, suggested_filename=None, headers=None):
     """
     处理用户的视频流选择和操作选择。
     """
@@ -712,16 +742,16 @@ def handle_user_choice(streams, cookie=None, suggested_filename=None):
     while True:
         operation = input("请输入操作编号 (1-5): ")
         if operation == '1':
-            perform_download(selected_stream, cookie, suggested_filename)
+            perform_download(selected_stream, cookie, suggested_filename, headers)
             break
         elif operation == '2':
             perform_playback(selected_stream)
             break
         elif operation == '3':
-            perform_livestream(selected_stream, cookie)
+            perform_livestream(selected_stream, cookie, headers)
             break
         elif operation == '4':
-            view_or_download_m3u8(selected_stream, cookie)
+            view_or_download_m3u8(selected_stream, cookie, headers)
             break
         elif operation == '5':
             print("操作取消，程序退出。")
@@ -754,6 +784,7 @@ if __name__ == "__main__":
     m3u8_content_start = input_data.find("#EXTM3U")
     base_url = None
     cookie = None
+    headers = {}
     suggested_filename = None
     
     if m3u8_content_start != -1:
@@ -776,11 +807,11 @@ if __name__ == "__main__":
             url = minyami_url_match.group(1).strip()
             print(f"[信息] 从 minyami 命令中提取到 URL: {url}")
             
-            # 尝试提取 Cookie（从 --headers 参数中）
-            # 处理多种可能的格式：--headers "Cookie: xxx" 或 --headers 'Cookie: xxx'
-            minyami_cookie_match = re.search(r'--headers\s+["\']Cookie:\s*([^"\'\n]+)["\']', input_data)
-            if minyami_cookie_match:
-                cookie = minyami_cookie_match.group(1).strip()
+            # 支持多个合法请求 header，而不把敏感值打印到控制台。
+            minyami_headers_match = re.search(r'--headers\s+["\'](.*?)["\']', input_data, re.S)
+            if minyami_headers_match:
+                headers.update(parse_header_blob(minyami_headers_match.group(1)))
+                cookie = headers.get('Cookie')
                 print("[信息] 从 minyami 命令中提取到 Cookie")
         
         # 如果 minyami 格式未匹配，尝试原有的格式
@@ -789,20 +820,20 @@ if __name__ == "__main__":
                 line = line.strip()
                 if line.startswith("视频链接:"):
                     url = line.split(":", 1)[1].strip()
-                elif line.startswith("Cookie:"):
-                    cookie = line.split(":", 1)[1].strip()
+                elif re.match(r'^(Cookie|Referer|Authorization|User-Agent):', line, re.I):
+                    headers.update(parse_header_blob(line))
+                    cookie = headers.get('Cookie')
         
         if url:
             print(f"[信息] 检测到视频链接: {url}")
-            if cookie:
-                print("[信息] 使用提供的Cookie进行请求。")
+            if headers:
+                print(f"[信息] 使用请求头: {', '.join(headers.keys())}")
             
             base_url = url 
             
             # 下载M3U8内容
             req = urllib.request.Request(url)
-            if cookie:
-                req.add_header('Cookie', cookie)
+            add_request_headers(req, make_headers(cookie, headers))
             
             try:
                 with urllib.request.urlopen(req, timeout=15) as response: # 增加超时设置
@@ -816,6 +847,6 @@ if __name__ == "__main__":
             sys.exit(1)
     
     streams = parse_m3u8_string(m3u8_content, base_url)
-    handle_user_choice(streams, cookie, suggested_filename)
+    handle_user_choice(streams, cookie, suggested_filename, headers)
         
     print("\n程序运行结束。")

@@ -30,6 +30,9 @@ ffmpeg -re -i "TargetVideo.ts" -c:v libx264 -preset veryfast -b:v 3000k -maxrate
 - Push forward streaming
 - M3U8 playlist illustration
 - CDN Services integration
+- HLS master/media playlist parsing with relative URL resolution
+- Legal request header passthrough for Cookie, Referer, Authorization and User-Agent
+- Refuses encrypted HLS playlists instead of attempting decryption
 
 ## Files
 
@@ -67,13 +70,22 @@ ffmpeg -re -i "TargetVideo.ts" -c:v libx264 -preset veryfast -b:v 3000k -maxrate
 minyami -d "https://example.com/stream.m3u8" --threads 8 --headers "Cookie: key1=val1;key2=val2" -o "output.ts"
 ```
 
-### 2. 自动提取信息
+### 2. 标准 HLS 请求头
+
+除 `Cookie:` 外，也可以提供 `Referer:`、`Authorization:` 和
+`User-Agent:`。解析器不再依赖 `index_N_N.ts` 的分片命名，而是直接读取
+playlist 中的分片 URL，并兼容 master playlist 的相对地址与 query 参数。
+
+仅对你有权访问和转播的普通未加密 HLS 使用这些功能。遇到带有非 `NONE`
+`#EXT-X-KEY` 的 playlist，工具会停止并提示，不会尝试解密或绕过 DRM。
+
+### 3. 自动提取信息
 
 - **URL 提取**：从 `minyami -d "..."` 中提取 URL
 - **Cookie 提取**：从 `--headers "Cookie: ..."` 中提取 Cookie
 - **节目名称提取**：从 `节目名称:` 行提取名称，用作建议的文件名
 
-### 3. 智能文件名建议
+### 4. 智能文件名建议
 
 当检测到节目名称时，下载时会自动建议使用清理后的节目名称作为文件名：
 - 非法字符（`<>:"/\|?*`）会被替换为下划线
