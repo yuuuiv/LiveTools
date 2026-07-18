@@ -1,2 +1,13 @@
 __pycache__/
 *.py[cod]
+stream_input.txt
+*.private.txt
+/.tools/
+# Widevine 设备文件（敏感）
+*.wvd
+# 收割临时文件
+livetools_harvest_*
+# Playwright 浏览器数据
+/.playwright/
+/relay
+*.exe

@@ -1,0 +1,22 @@
+# 复制为 stream_input.txt 后填写。stream_input.txt 已加入 .gitignore。
+节目名称: authorized-show
+视频链接: https://media.example.com/path/index.mpd
+Cookie:
+Referer: https://media.example.com/
+User-Agent: Mozilla/5.0
+Authorization:
+
+# CENC DASH 转推只填写密钥文件路径或环境变量名，密钥本身不要写进本文件。
+# 密钥文件每行格式：KID:KEY；也可设置 LIVETOOLS_DRM_KEY 环境变量。
+DRM密钥文件:
+DRM密钥环境变量: LIVETOOLS_DRM_KEY
+N_m3u8DL-RE路径: C:\Tools\N_m3u8DL-RE.exe
+FFmpeg路径: D:\ffmpeg\bin\ffmpeg.exe
+
+# 可选：填写后可以跳过菜单，直接运行配置中的动作。
+操作: push
+清晰度: best
+流名称: 3696505
+
+# 阿里云启用推流鉴权时，在私有配置中填完整签名地址；否则保持空白。
+推流地址:
