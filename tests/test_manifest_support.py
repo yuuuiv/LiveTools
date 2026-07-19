@@ -17,7 +17,7 @@ import page_harvester
 
 
 PROTECTED_MPD = '''
-<MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+<MPD type="dynamic" xmlns="urn:mpeg:dash:schema:mpd:2011"
      xmlns:cenc="urn:mpeg:cenc:2013">
   <Period>
     <AdaptationSet mimeType="video/mp4">
@@ -72,6 +72,40 @@ class ManifestSupportTests(unittest.TestCase):
         self.assertEqual([stream.video_index for stream in streams], [0, 1])
         self.assertTrue(all(stream.manifest_type == 'dash' for stream in streams))
         self.assertTrue(all(stream.drm_info['protected'] for stream in streams))
+        self.assertFalse(any(stream.manifest_is_static for stream in streams))
+
+    def test_marks_explicit_static_mpd_for_vod_relay(self):
+        static_mpd = PROTECTED_MPD.replace(
+            '<MPD type="dynamic" ',
+            '<MPD type="static" mediaPresentationDuration="PT1M" ',
+            1,
+        )
+        streams = live_tools.parse_mpd_string(
+            static_mpd, 'https://example.com/index.mpd')
+
+        self.assertTrue(all(stream.manifest_is_static for stream in streams))
+
+    def test_detects_live_refresh_markers_when_type_is_omitted(self):
+        live_mpd = PROTECTED_MPD.replace(
+            '<MPD type="dynamic" ',
+            '<MPD minimumUpdatePeriod="PT2S" timeShiftBufferDepth="PT30S" ',
+            1,
+        )
+        streams = live_tools.parse_mpd_string(
+            live_mpd, 'https://example.com/live.mpd')
+
+        self.assertTrue(all(not stream.manifest_is_static for stream in streams))
+
+    def test_explicit_static_type_overrides_refresh_metadata(self):
+        static_mpd = PROTECTED_MPD.replace(
+            '<MPD type="dynamic" ',
+            '<MPD type="static" minimumUpdatePeriod="PT2S" ',
+            1,
+        )
+        streams = live_tools.parse_mpd_string(
+            static_mpd, 'https://example.com/static.mpd')
+
+        self.assertTrue(all(stream.manifest_is_static for stream in streams))
 
     def test_clear_dash_is_not_marked_as_drm(self):
         streams = live_tools.parse_mpd_string(CLEAR_MPD, 'https://example.com/index.mpd')
@@ -242,7 +276,68 @@ video/720p.m3u8
             r'C:\tools\mp4decrypt.exe',
         )
 
-    def test_drm_relay_command_uses_cached_mpd_with_remote_base_url(self):
+    def test_dynamic_drm_prefers_shaka_packager_for_realtime_cenc(self):
+        stream = live_tools.parse_mpd_string(
+            PROTECTED_MPD, 'https://example.com/live.mpd')[0]
+        key_pair = (
+            'e7d6e1cadd9f495a8eade2116710660b:'
+            '00112233445566778899aabbccddeeff'
+        )
+
+        with mock.patch.dict(os.environ, {'SHOW_DRM_KEY': key_pair}), \
+             mock.patch.object(
+                 live_tools, 'resolve_executable',
+                 side_effect=[
+                     r'C:\tools\N_m3u8DL-RE.exe',
+                     r'C:\tools\ffmpeg.exe',
+                     FileNotFoundError('mp4decrypt'),
+                     r'C:\tools\shaka-packager.exe',
+                 ]), \
+             mock.patch.object(
+                 live_tools, 'run_relay_process',
+                 return_value=0) as run:
+            result = live_tools.perform_drm_livestream(
+                stream,
+                'rtmp://push.example.com/live/demo',
+                drm_key_env='SHOW_DRM_KEY',
+            )
+
+        command = run.call_args.args[0]
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            command[command.index('--decryption-engine') + 1],
+            'SHAKA_PACKAGER',
+        )
+        self.assertEqual(
+            command[command.index('--decryption-binary-path') + 1],
+            r'C:\tools\shaka-packager.exe',
+        )
+        self.assertIn('--mp4-real-time-decryption', command)
+        self.assertIn('--live-pipe-mux', command)
+
+    def test_static_drm_relay_command_muxes_after_download(self):
+        static_mpd = PROTECTED_MPD.replace(
+            '<MPD type="dynamic" ', '<MPD type="static" ', 1)
+        stream = live_tools.parse_mpd_string(
+            static_mpd, 'https://example.com/index.mpd')[0]
+
+        command = live_tools.build_drm_relay_command(
+            stream,
+            {},
+            r'C:\temp\keys.private.txt',
+            r'C:\tools\N_m3u8DL-RE.exe',
+            r'C:\tools\ffmpeg.exe',
+            r'C:\temp\relay',
+            live_mode=False,
+        )
+
+        self.assertIn('--mux-after-done', command)
+        self.assertIn('format=ts:keep=true', command)
+        self.assertIn('--use-ffmpeg-concat-demuxer', command)
+        self.assertNotIn('--mp4-real-time-decryption', command)
+        self.assertNotIn('--live-pipe-mux', command)
+
+    def test_dynamic_drm_relay_uses_remote_mpd_for_refresh(self):
         stream = live_tools.parse_mpd_string(
             PROTECTED_MPD,
             'https://media.example/path/live/index.mpd?token=secret',
@@ -258,11 +353,34 @@ video/720p.m3u8
             r'C:\temp\relay',
         )
 
+        self.assertEqual(command[1], stream.url)
+        self.assertNotIn('--base-url', command)
+        self.assertIn('Cookie: session=secret', command)
+
+    def test_static_drm_relay_uses_cached_mpd_with_remote_base_url(self):
+        static_mpd = PROTECTED_MPD.replace(
+            '<MPD type="dynamic" ', '<MPD type="static" ', 1)
+        stream = live_tools.parse_mpd_string(
+            static_mpd,
+            'https://media.example/path/static/index.mpd?token=secret',
+        )[0]
+        stream.relay_manifest_source = r'C:\temp\cached.mpd'
+
+        command = live_tools.build_drm_relay_command(
+            stream,
+            {'Cookie': 'session=secret'},
+            r'C:\temp\keys.private.txt',
+            r'C:\tools\N_m3u8DL-RE.exe',
+            r'C:\tools\ffmpeg.exe',
+            r'C:\temp\relay',
+            live_mode=False,
+        )
+
         self.assertEqual(command[1], r'C:\temp\cached.mpd')
         self.assertIn('--base-url', command)
         self.assertEqual(
             command[command.index('--base-url') + 1],
-            'https://media.example/path/live/',
+            'https://media.example/path/static/',
         )
         self.assertIn('Cookie: session=secret', command)
 
@@ -292,10 +410,11 @@ FFmpeg路径: D:\\ffmpeg\\bin\\ffmpeg.exe
              mock.patch.object(
                  live_tools, 'resolve_executable',
                  side_effect=[
-                     r'C:\tools\N_m3u8DL-RE.exe',
-                     r'C:\tools\ffmpeg.exe',
-                     FileNotFoundError('mp4decrypt'),
-                 ]), \
+                    r'C:\tools\N_m3u8DL-RE.exe',
+                    r'C:\tools\ffmpeg.exe',
+                    FileNotFoundError('mp4decrypt'),
+                    FileNotFoundError('shaka-packager'),
+                ]), \
              mock.patch.object(
                  live_tools, 'run_relay_process',
                  return_value=0) as run:

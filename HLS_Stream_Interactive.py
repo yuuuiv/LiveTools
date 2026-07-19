@@ -115,7 +115,8 @@ class VideoStream:
     """定义一个类来存储解析出的视频流信息"""
     def __init__(self, resolution, bandwidth, url, headers=None,
                  manifest_type="hls", video_index=None, codecs=None,
-                 drm_info=None, relay_manifest_source=None):
+                 drm_info=None, relay_manifest_source=None,
+                 manifest_is_static=False):
         self.resolution = resolution
         self.bandwidth = bandwidth
         self.url = url
@@ -125,6 +126,11 @@ class VideoStream:
         self.codecs = codecs or "N/A"
         self.drm_info = drm_info or empty_drm_info()
         self.relay_manifest_source = relay_manifest_source
+        # DASH MPDs explicitly marked type="static" are finite VOD assets.
+        # They need a download/decrypt/mux stage before FFmpeg can pace them
+        # into an RTMP live input; treating them as a live-refreshing MPD
+        # makes N_m3u8DL-RE exit after downloading all segments.
+        self.manifest_is_static = bool(manifest_is_static)
     
     def __str__(self):
         return f"分辨率: {self.resolution} | 码率: {self.bandwidth} | URL: {safe_source_label(self.url)[:60]}..."
@@ -379,9 +385,20 @@ def validate_rtmp_url(value):
 def build_drm_relay_command(stream, headers, key_file_path, downloader_path,
                             ffmpeg_path, work_dir, live_take_count=3,
                             decryption_engine="FFMPEG",
-                            decryption_binary_path=None):
-    """Build the live decrypt command without placing key bytes on argv."""
-    manifest_input = stream.relay_manifest_source or stream.url
+                            decryption_binary_path=None, live_mode=True):
+    """Build a decrypt command without placing key bytes on argv.
+
+    N_m3u8DL-RE only enables ``--live-pipe-mux`` for a live playlist.  A
+    static MPD follows the VOD path, so it must be muxed after download and
+    then paced into the RTMP endpoint by a separate FFmpeg process.
+    """
+    # A cached MPD is useful for a finite/static presentation, but a dynamic
+    # presentation must stay on the origin URL so N_m3u8DL-RE can refresh the
+    # manifest and follow the current segment window.
+    manifest_input = (
+        stream.url if live_mode else
+        (stream.relay_manifest_source or stream.url)
+    )
     decryption_engine = (decryption_engine or "FFMPEG").upper()
     decryption_binary_path = decryption_binary_path or ffmpeg_path
     command = [
@@ -391,11 +408,6 @@ def build_drm_relay_command(stream, headers, key_file_path, downloader_path,
         '--decryption-engine', decryption_engine,
         '--decryption-binary-path', decryption_binary_path,
         '--ffmpeg-binary-path', ffmpeg_path,
-        '--mp4-real-time-decryption',
-        '--live-real-time-merge',
-        '--live-pipe-mux',
-        '--live-keep-segments', 'false',
-        '--live-take-count', str(max(1, int(live_take_count))),
         '--save-dir', work_dir,
         '--save-name', 'relay',
         '--log-level', 'OFF',
@@ -403,6 +415,25 @@ def build_drm_relay_command(stream, headers, key_file_path, downloader_path,
         '--no-ansi-color',
         '--disable-update-check',
     ]
+    if live_mode:
+        command.extend([
+            '--mp4-real-time-decryption',
+            '--live-real-time-merge',
+            '--live-pipe-mux',
+            '--live-keep-segments', 'false',
+            '--live-take-count', str(max(1, int(live_take_count))),
+        ])
+    else:
+        # Keep the muxed file because it is the input for the paced RTMP
+        # relay that follows this downloader process.  The concat demuxer is
+        # required for fragmented MP4 files; the concat protocol can simply
+        # byte-join the per-segment moov boxes and produce an unreadable MP4.
+        command.extend([
+            '--use-ffmpeg-concat-demuxer',
+            # MPEG-TS avoids carrying fragmented-MP4 track metadata into the
+            # RTMP reader and is the native transport container for FLV/RTMP.
+            '--mux-after-done', 'format=ts:keep=true',
+        ])
     for name, value in (headers or {}).items():
         if value:
             command.extend(['-H', f'{name}: {value}'])
@@ -448,14 +479,16 @@ def should_print_relay_line(line):
     return any(keyword in lowered or keyword in line for keyword in keywords)
 
 
-def run_relay_process(command, child_environment, log_path):
+def run_relay_process(command, child_environment, log_path,
+                      status_message=None):
     process = subprocess.Popen(
         command,
         env=child_environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
-    print("[状态] 解密转推进程已启动；无错误时终端会保持静默，按 Ctrl+C 停止。")
+    print(status_message or
+          "[状态] 解密转推进程已启动；无错误时终端会保持静默，按 Ctrl+C 停止。")
     pending = ''
     printed = set()
     with open(log_path, 'w', encoding='utf-8', errors='replace') as log_file:
@@ -490,12 +523,58 @@ def run_relay_process(command, child_environment, log_path):
             raise
 
 
+def find_muxed_media(work_dir):
+    """Find the final media file produced by ``--mux-after-done``."""
+    candidates = []
+    for root, _, files in os.walk(work_dir):
+        for name in files:
+            if os.path.splitext(name)[1].lower() not in {'.mp4', '.mkv', '.ts'}:
+                continue
+            path = os.path.join(root, name)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            if size > 0:
+                candidates.append((path, size))
+    if not candidates:
+        return ''
+    # Prefer the requested save name, then the largest completed media file.
+    candidates.sort(key=lambda item: (
+        0 if 'relay' in os.path.basename(item[0]).lower() else 1,
+        -item[1],
+    ))
+    return candidates[0][0]
+
+
+def run_vod_relay(media_path, rtmp_url, ffmpeg_path):
+    """Pace a finished decrypted media file into the RTMP live endpoint."""
+    command = [
+        ffmpeg_path,
+        '-re',
+        '-fflags', '+genpts',
+        '-i', media_path,
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        '-c', 'copy',
+        '-f', 'flv',
+        rtmp_url,
+    ]
+    print(f"[VOD转推] 已生成解密媒体，开始按实时速率推送: {media_path}")
+    print("[状态] FFmpeg 转推已启动；按 Ctrl+C 停止。")
+    return subprocess.run(command).returncode
+
+
 def perform_drm_livestream(stream, rtmp_url, headers=None, drm_key_file=None,
                            drm_key_env=DRM_KEY_ENV_DEFAULT,
                            downloader_path=None, ffmpeg_path=None,
                            mp4decrypt_path=None, restart_count=0, restart_delay=5,
                            live_take_count=3):
-    """Decrypt an authorized dynamic CENC MPD and relay it through FFmpeg."""
+    """Decrypt a CENC MPD and relay it through FFmpeg.
+
+    Dynamic MPDs use N_m3u8DL-RE's live pipe.  Static MPDs are downloaded,
+    decrypted and muxed first, then streamed with FFmpeg's ``-re`` pacing.
+    """
     if stream.manifest_type != 'dash':
         raise ValueError("实时 DRM 转推当前需要 MPEG-DASH MPD")
     if urllib.parse.urlsplit(stream.url).scheme not in {'http', 'https'}:
@@ -509,12 +588,35 @@ def perform_drm_livestream(stream, rtmp_url, headers=None, drm_key_file=None,
     downloader = resolve_executable(
         downloader_path, ['N_m3u8DL-RE.exe', 'N_m3u8DL-RE'])
     ffmpeg = resolve_executable(ffmpeg_path, ['ffmpeg.exe', 'ffmpeg'])
+    live_mode = not stream.manifest_is_static
+
+    # N_m3u8DL-RE recommends Shaka Packager for CENC real-time decryption.
+    # Bento4/mp4decrypt remains the preferred finite-MPD engine because the
+    # static path first completes a local mux before FFmpeg pacing.
     mp4decrypt = resolve_optional_executable(
         mp4decrypt_path, ['mp4decrypt.exe', 'mp4decrypt'])
-    decryption_engine = 'MP4DECRYPT' if mp4decrypt else 'FFMPEG'
-    decryption_binary = mp4decrypt or ffmpeg
+    shaka_packager = resolve_optional_executable(
+        None, ['shaka-packager.exe', 'packager-win-x64.exe', 'packager.exe'])
+    if live_mode and shaka_packager:
+        decryption_engine = 'SHAKA_PACKAGER'
+        decryption_binary = shaka_packager
+    elif mp4decrypt:
+        decryption_engine = 'MP4DECRYPT'
+        decryption_binary = mp4decrypt
+    elif shaka_packager:
+        decryption_engine = 'SHAKA_PACKAGER'
+        decryption_binary = shaka_packager
+    else:
+        decryption_engine = 'FFMPEG'
+        decryption_binary = ffmpeg
+    print(f"[DRM] 解密引擎: {decryption_engine} ({os.path.basename(decryption_binary)})")
     key_lines = expand_key_lines_for_downloader(
         load_drm_key_lines(drm_key_file, drm_key_env, required_kids))
+    if live_mode:
+        print("[模式] 检测为动态 MPD，使用实时刷新与管道转推。")
+    else:
+        print("[模式] 检测到 MPD type=static（点播清单）。")
+        print("[模式] 先完成分片解密/混流，再按实时速率转推到阿里云。")
 
     private_dir = tempfile.mkdtemp(prefix='livetools-drm-')
     key_path = os.path.join(private_dir, 'keys.private.txt')
@@ -532,12 +634,18 @@ def perform_drm_livestream(stream, rtmp_url, headers=None, drm_key_file=None,
             stream, headers, key_path, downloader, ffmpeg, private_dir,
             live_take_count=live_take_count,
             decryption_engine=decryption_engine,
-            decryption_binary_path=decryption_binary)
+            decryption_binary_path=decryption_binary,
+            live_mode=live_mode)
         child_environment = os.environ.copy()
         child_environment.pop(drm_key_env or DRM_KEY_ENV_DEFAULT, None)
-        # N_m3u8DL-RE feeds decrypted audio/video into its FFmpeg named pipes.
-        # A leading '-' makes this value a complete FFmpeg output argument set.
-        child_environment['RE_LIVE_PIPE_OPTIONS'] = f'-f flv "{rtmp_url}"'
+        if live_mode:
+            # N_m3u8DL-RE feeds decrypted audio/video into its FFmpeg named
+            # pipes. A leading '-' makes this a complete FFmpeg output set.
+            child_environment['RE_LIVE_PIPE_OPTIONS'] = f'-f flv "{rtmp_url}"'
+        else:
+            # Do not accidentally make a future N_m3u8DL version select the
+            # live-pipe path for this finite MPD.
+            child_environment.pop('RE_LIVE_PIPE_OPTIONS', None)
 
         attempts = max(0, int(restart_count)) + 1
         for attempt in range(attempts):
@@ -546,8 +654,28 @@ def perform_drm_livestream(stream, rtmp_url, headers=None, drm_key_file=None,
                       f"({attempt}/{attempts - 1})...")
                 time.sleep(max(0, restart_delay))
             returncode = run_relay_process(
-                command, child_environment, relay_log_path)
+                command,
+                child_environment,
+                relay_log_path,
+                status_message=(
+                    "[状态] 实时解密转推进程已启动；按 Ctrl+C 停止。"
+                    if live_mode else
+                    "[状态] 正在下载并解密静态 MPD；完成后自动开始 RTMP 转推。"
+                ),
+            )
             if returncode == 0:
+                if not live_mode:
+                    media_path = find_muxed_media(private_dir)
+                    if not media_path:
+                        print("[错误] 静态 MPD 已下载，但没有找到 N_m3u8DL-RE "
+                              "生成的 MP4/TS 文件。")
+                        print(f"[日志] 详情已保存: {relay_log_path}")
+                        return 1
+                    returncode = run_vod_relay(media_path, rtmp_url, ffmpeg)
+                    if returncode != 0:
+                        print(f"[警告] FFmpeg 点播转推进程退出，代码: {returncode}")
+                        print(f"[日志] 详情已保存: {relay_log_path}")
+                        return returncode
                 try:
                     os.unlink(relay_log_path)
                 except OSError:
@@ -570,6 +698,26 @@ def parse_mpd_string(input_string, manifest_url):
         raise ValueError("XML 根元素不是 MPD")
 
     drm_info = detect_mpd_drm(input_string)
+    # DASH defaults to a static presentation when the attribute is omitted.
+    # Keep the flag here so the relay can choose the correct N_m3u8DL-RE path
+    # without re-fetching the source MPD.
+    raw_presentation_type = root.attrib.get('type')
+    presentation_type = (raw_presentation_type or 'static').strip().lower()
+    # A few live origins omit type="dynamic" but expose the DASH live
+    # refresh markers instead. Treat those as live while keeping an explicit
+    # type="static" authoritative.
+    has_live_refresh_markers = any(
+        (root.attrib.get(name) or '').strip()
+        for name in ('minimumUpdatePeriod', 'timeShiftBufferDepth')
+    )
+    if presentation_type == 'dynamic':
+        manifest_is_static = False
+    elif raw_presentation_type is not None:
+        # An explicit type="static" is authoritative even if an origin adds
+        # an otherwise-live-looking attribute for cache metadata.
+        manifest_is_static = True
+    else:
+        manifest_is_static = not has_live_refresh_markers
     streams = []
     video_index = 0
 
@@ -612,6 +760,7 @@ def parse_mpd_string(input_string, manifest_url):
                 video_index=video_index,
                 codecs=codecs,
                 drm_info=drm_info,
+                manifest_is_static=manifest_is_static,
             ))
             video_index += 1
 
@@ -620,6 +769,7 @@ def parse_mpd_string(input_string, manifest_url):
             "N/A", "N/A", manifest_url,
             manifest_type="dash",
             drm_info=drm_info,
+            manifest_is_static=manifest_is_static,
         ))
 
     return streams

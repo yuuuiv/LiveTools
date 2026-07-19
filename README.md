@@ -77,21 +77,39 @@ python .\HLS_Stream_Interactive.py --input .\stream_input.txt
 Token、内容密钥或带签名参数的推流地址。MPD 中出现 `ContentProtection` 时，
 工具会显示加密方案、DRM 系统与默认 KID。
 
-### CENC DASH 实时解密转推
+### CENC DASH 解密转推
 
-这条链路用于已经取得内容密钥的动态 MPD：
+动态 MPD 使用实时管道；页面收割得到的 MPD 如果标记为
+`type="static"`，工具会自动切换为“先解密混流、再按实时速率转推”的点播回放链路。
+
+动态 MPD 的链路为：
 
 1. `N_m3u8DL-RE` 持续刷新 MPD、下载选定的视频与音频分片。
-2. FFmpeg 解密 CENC 分片。
+2. 优先使用 Shaka Packager 解密实时 CENC 分片；未找到时回退到
+   Bento4 `mp4decrypt`，再回退到 FFmpeg。
 3. `N_m3u8DL-RE --live-pipe-mux` 通过命名管道把解密后的音视频交给 FFmpeg。
 4. FFmpeg 以流复制方式输出 RTMP/RTMPS，默认不保留明文分片。
+
+静态 MPD 的链路为：
+
+1. `N_m3u8DL-RE` 下载全部分片并完成 CENC 解密。
+2. 使用 `--mux-after-done format=ts:keep=true` 生成完整 MPEG-TS 媒体文件。
+3. FFmpeg 使用 `-re` 按原始速率将该文件推送到 RTMP/RTMPS。
+
+静态 MPD 下载结束后，终端会先显示“正在下载并解密静态 MPD”，随后显示
+“VOD转推”。下载进程自然退出是正常现象，之后的 FFmpeg 进程才是持续的阿里云推流进程。
 
 依赖：
 
 - `N_m3u8DL-RE`（放入 PATH，或使用 `--n-m3u8dl-re` 指定）
 - FFmpeg（放入 PATH，或使用 `--ffmpeg-binary` 指定）
+- Shaka Packager（动态 CENC MPD 推荐放入 `LiveTools/.tools`，文件名为
+  `shaka-packager.exe`；脚本会自动检测）
+- Bento4 `mp4decrypt`（CENC 静态 MPD 推荐放入 `LiveTools/.tools`，脚本会自动检测）
 
-脚本也会自动查找 `LiveTools/.tools/N_m3u8DL-RE.exe`；`.tools` 已被 Git 忽略。
+脚本也会自动查找 `LiveTools/.tools/N_m3u8DL-RE.exe` 和
+`LiveTools/.tools/shaka-packager.exe`、`LiveTools/.tools/mp4decrypt.exe`；
+`.tools` 已被 Git 忽略。
 
 PowerShell 示例。环境变量内容可写成 `KID:KEY`；当 MPD 只有一个 KID 时，
 也可只写 32 位十六进制 KEY：
@@ -116,8 +134,10 @@ Remove-Item Env:LIVETOOLS_DRM_KEY
 `--drm-key-file .\keys.private.txt`。`*.private.txt` 已在 `.gitignore` 中。
 包装器会校验密钥是否覆盖 MPD 声明的全部 KID，再生成短生命周期的临时密钥
 文件；子进程环境中会移除原始密钥变量，并关闭 `N_m3u8DL-RE` 文件日志。
-解密器仍会在短生命周期的 FFmpeg 子进程参数中接收原始 KEY，这是
-`N_m3u8DL-RE` 当前 FFmpeg 解密后端的工作方式；请在受控主机上运行。
+静态 CENC MPD 会优先使用 `mp4decrypt` 完成分片解密，再交给 FFmpeg 混流；
+动态直播才使用 `--mp4-real-time-decryption` 管道，并优先选择 Shaka Packager。
+即使页面收割流程生成了本地 MPD 快照，动态推流仍会回到原始远程 MPD，
+确保清单持续刷新并跟随最新分片窗口。
 
 直播转推必须使用原始 HTTP(S) MPD URL。下载到本地的 `index.mpd` 适合检查
 KID、清晰度和编码，但此类清单通常只有相对分片地址，且不会继续刷新。
