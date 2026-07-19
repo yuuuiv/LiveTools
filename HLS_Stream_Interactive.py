@@ -13,6 +13,44 @@ import asyncio # 用于异步下载
 import tempfile
 import xml.etree.ElementTree as ET
 
+
+# 默认推流配置。推流域名使用独立的 A 类鉴权密钥；命令行仍可通过
+# --push-url 覆盖完整地址，便于切换到其它环境或临时签名地址。
+DEFAULT_PUSH_DOMAIN = "push.neofantasy.online"
+DEFAULT_PLAY_DOMAIN = "play.neofantasy.online"
+DEFAULT_PUSH_AUTH_KEY = "neofantasyonline"
+DEFAULT_PUSH_AUTH_TTL_SECONDS = 1800
+
+
+def get_push_auth_key():
+    """Return the A-auth key without requiring it on every command line."""
+    return (
+        os.environ.get("LIVETOOLS_PUSH_AUTH_KEY")
+        or os.environ.get("NEOFANTASY_PUSH_AUTH_KEY")
+        or DEFAULT_PUSH_AUTH_KEY
+    ).strip()
+
+
+def get_push_auth_ttl_seconds():
+    """Read the short-lived push URL lifetime with a safe fallback."""
+    raw_value = os.environ.get("LIVETOOLS_PUSH_AUTH_TTL_SECONDS", "")
+    try:
+        ttl = int(raw_value) if raw_value else DEFAULT_PUSH_AUTH_TTL_SECONDS
+    except (TypeError, ValueError):
+        ttl = DEFAULT_PUSH_AUTH_TTL_SECONDS
+    return max(60, ttl)
+
+
+def build_default_push_url(stream_name, push_domain=DEFAULT_PUSH_DOMAIN,
+                           app_name="live", now=None):
+    """Build the default A-authenticated RTMP target for a stream name."""
+    stream_name = (stream_name or "").strip()
+    if not stream_name:
+        raise ValueError("流名称不能为空")
+    unsigned_url = f"rtmp://{push_domain}/{app_name}/{stream_name}"
+    expires = int(time.time() if now is None else now) + get_push_auth_ttl_seconds()
+    return a_auth(unsigned_url, get_push_auth_key(), expires)
+
 # 页面自动收割模块（可选依赖）
 try:
     from page_harvester import (
@@ -1212,9 +1250,10 @@ def perform_livestream(stream, cookie=None, headers=None, stream_name=None, push
         print("\n[错误] 推流需要原始 MPD/M3U8 URL 或可解析分片的本地清单路径。")
         return 1
     
-    # 阿里云视频直播配置
-    PUSH_DOMAIN = "push.neofantasy.online"  # 阿里云推流域名
-    PLAY_DOMAIN = "play.neofantasy.online"  # 阿里云播放域名
+    # 阿里云视频直播配置。只传 --stream-name 时，推流地址会自动使用
+    # A 类鉴权；如需临时覆盖，可通过 --push-url 传入完整 RTMP(S) 地址。
+    PUSH_DOMAIN = os.environ.get("LIVETOOLS_PUSH_DOMAIN", DEFAULT_PUSH_DOMAIN)
+    PLAY_DOMAIN = os.environ.get("LIVETOOLS_PLAY_DOMAIN", DEFAULT_PLAY_DOMAIN)
     APP_NAME = "live"                       # 应用名称 (AppName)
     
     # StreamName 是流名称，不是源站账号凭据。可由配置/命令行传入。
@@ -1228,9 +1267,16 @@ def perform_livestream(stream, cookie=None, headers=None, stream_name=None, push
         print("[错误] 推流密钥不能为空，操作取消。")
         return 1
     
-    # 未提供完整推流 URL 时沿用默认阿里云地址。启用推流鉴权的环境应通过
-    # --push-url 或私有输入文件提供阿里云签名后的完整地址。
-    rtmp_url = push_url or f"rtmp://{PUSH_DOMAIN}/{APP_NAME}/{stream_key}"
+    push_url_is_signed = bool(push_url)
+    if push_url:
+        rtmp_url = push_url
+    else:
+        rtmp_url = build_default_push_url(
+            stream_key,
+            push_domain=PUSH_DOMAIN,
+            app_name=APP_NAME,
+        )
+        push_url_is_signed = True
     
     compact_push_output = bool(stream.relay_manifest_source)
     if compact_push_output:
@@ -1246,6 +1292,15 @@ def perform_livestream(stream, cookie=None, headers=None, stream_name=None, push
         print(f"       HLS 播放:  https://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}.m3u8")
         print(f"       FLV 播放:  https://{PLAY_DOMAIN}/{APP_NAME}/{stream_key}.flv")
         print("       播放鉴权已启用时，请通过 /get-stream 获取签名播放地址。")
+
+    if push_url_is_signed:
+        if push_url:
+            print("[推流鉴权] 使用传入的完整 RTMP(S) 地址。")
+        else:
+            print(
+                f"[推流鉴权] 已自动生成 A 类 auth_key，"
+                f"有效期 {get_push_auth_ttl_seconds()} 秒。"
+            )
 
     if stream.drm_info.get('protected'):
         if compact_push_output:

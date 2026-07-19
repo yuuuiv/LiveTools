@@ -59,6 +59,13 @@ python .\HLS_Stream_Interactive.py `
   --stream-name 3696505
 ```
 
+未传 `--push-url` 时，工具会自动推送到
+`rtmp://push.neofantasy.online/live/<stream-name>`，并使用默认的阿里云 A 类
+鉴权主 key `neofantasyonline` 生成短时 `auth_key`。如需切换环境，可通过
+`LIVETOOLS_PUSH_AUTH_KEY`、`LIVETOOLS_PUSH_DOMAIN` 和
+`LIVETOOLS_PUSH_AUTH_TTL_SECONDS` 覆盖默认值；传入 `--push-url` 时则直接使用
+该完整地址。
+
 如果每次都需要相同的源站请求头，可将 `stream_input.example.txt` 复制为
 `stream_input.txt`，填入私有信息后运行：
 

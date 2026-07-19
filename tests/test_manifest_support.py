@@ -4,6 +4,7 @@ import unittest
 import base64
 import json
 import tempfile
+import urllib.parse
 from types import SimpleNamespace
 from unittest import mock
 
@@ -113,6 +114,7 @@ video/720p.m3u8
         stream = live_tools.parse_mpd_string(CLEAR_MPD, 'https://example.com/index.mpd')[0]
 
         with mock.patch.object(live_tools, 'check_ffmpeg', return_value=True), \
+             mock.patch.object(live_tools.time, 'time', return_value=1700000000), \
              mock.patch.object(live_tools.subprocess, 'run') as run:
             live_tools.perform_livestream(
                 stream,
@@ -126,7 +128,40 @@ video/720p.m3u8
         self.assertIn('-map', command)
         self.assertIn('0:v:0', command)
         self.assertIn('0:a:0?', command)
-        self.assertEqual(command[-1], 'rtmp://push.neofantasy.online/live/3696505')
+        signed_url = urllib.parse.urlsplit(command[-1])
+        self.assertEqual(
+            signed_url.path,
+            '/live/3696505',
+        )
+        self.assertRegex(
+            signed_url.query,
+            r'^auth_key=1700001800-0-0-[0-9a-f]{32}$',
+        )
+
+    def test_default_push_url_uses_a_auth_key(self):
+        with mock.patch.object(live_tools.time, 'time', return_value=1700000000):
+            url = live_tools.build_default_push_url('20260718')
+
+        self.assertEqual(
+            url,
+            'rtmp://push.neofantasy.online/live/20260718?'
+            'auth_key=1700001800-0-0-'
+            'c2f8550099a5035aedcf74f5a4216d74',
+        )
+
+    def test_push_auth_key_can_be_overridden_without_cli_arguments(self):
+        with mock.patch.dict(
+            live_tools.os.environ,
+            {'LIVETOOLS_PUSH_AUTH_KEY': 'temporary-key'},
+            clear=False,
+        ), mock.patch.object(live_tools.time, 'time', return_value=1700000000):
+            url = live_tools.build_default_push_url('20260718')
+
+        self.assertIn(
+            'auth_key=1700001800-0-0-'
+            'a406d8e850f4ebd1673739591bf89a3a',
+            url,
+        )
 
     def test_normalizes_single_bare_key_against_manifest_kid(self):
         lines = live_tools.normalize_drm_key_material(
